@@ -5,8 +5,9 @@ import tkinter as tk
 from tkinter import ttk,messagebox,filedialog
 import httpx,truststore,keyring
 from mosaic_service import (AmbiguousSubmissionError,DEFAULT_MOSAIC_URL,MosaicJournal,MosaicPortalClient,evaluate_eligibility,execute_journaled_ookla,forget_mosaic_credentials,reconcile_journal_entry,latest_speed_result,load_mosaic_credentials,ookla_action_complete,match_subscriber,parse_customer_identity,save_mosaic_credentials,retryable_mosaic_outcome)
+from association_service import (AssociationReportCancelled,detail_csv_rows,fetch_association_report,filter_groups,format_age,summary_csv_rows,summary_text)
 from keyring.errors import PasswordDeleteError
-APP_VERSION='1.5.0';APP_DIR=Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent;UPDATE_CONFIG=APP_DIR/'update_config.json';DEFAULT_MANIFEST_URL='https://raw.githubusercontent.com/dogekamii/Operations-Toolkit/refs/heads/main/latest.json'
+APP_VERSION='1.6.1';APP_DIR=Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent;UPDATE_CONFIG=APP_DIR/'update_config.json';DEFAULT_MANIFEST_URL='https://raw.githubusercontent.com/dogekamii/Operations-Toolkit/refs/heads/main/latest.json'
 PKGS={"6 Mbps":("6mbps Package",6451,2150),"10 Mbps":("10mbps Package",10752,1075),"15 Mbps":("15mbps Package",16128,3225),"20 Mbps":("20mbps Package",21500,10752),"25 Mbps":("25mbps Package",26880,3225),"50 Mbps":("50mbps Package",53760,10750),"75 Mbps":("75mbps Package",80640,10750),"100 Mbps":("100mbps Package",107520,21500)}
 OTHER='Other / Unmatched';PHRASE='APPLY SPEED CHANGES';CONCURRENCY=4;CACHE_HOURS=24
 DATA=Path(os.getenv('LOCALAPPDATA',Path.home()))/'cnMaestroSpeedManager';DATA.mkdir(exist_ok=True);DB=DATA/'speed_manager.db';SETTINGS=DATA/'settings.json'
@@ -163,17 +164,17 @@ class App(tk.Tk):
  def ui(self):
   self.configure_styles();c=self.colors;self.shell=tk.Frame(self,bg=c['bg']);self.shell.pack(fill='both',expand=True)
   self.sidebar=tk.Frame(self.shell,bg=c['sidebar'],width=190,highlightbackground=c['border'],highlightthickness=1);self.sidebar.pack(side='left',fill='y');self.sidebar.pack_propagate(False)
-  self.nav_items={};self.service_navigation=[{'key':'cnmaestro','label':'cnMaestro','icon':'☁','tools':[{'key':'speed_manager','label':'Speed Manager'}]},{'key':'mosaic','label':'Mosaic','icon':'◈','tools':[{'key':'mosaic_speed_test','label':'Speed Test'}]}]
+  self.nav_items={};self.service_navigation=[{'key':'cnmaestro','label':'cnMaestro','icon':'☁','tools':[{'key':'speed_manager','label':'Speed Manager'},{'key':'ap_associations','label':'AP Associations'}]},{'key':'mosaic','label':'Mosaic','icon':'◈','tools':[{'key':'mosaic_speed_test','label':'Speed Test'}]}]
   self.nav_container=tk.Frame(self.sidebar,bg=c['sidebar']);self.nav_container.pack(fill='x',pady=(15,0));self.add_nav_row('overview','Overview','⌂')
   for service in self.service_navigation:self.add_service_group(service)
   self.add_nav_row('audit','Audit Log','▣');self.add_nav_row('settings','Settings','⚙')
   tk.Label(self.sidebar,text=f'v{APP_VERSION}',font=('Segoe UI',7),fg='#596878',bg=c['sidebar']).pack(side='bottom',anchor='w',padx=14,pady=12)
   self.content=tk.Frame(self.shell,bg=c['bg']);self.content.pack(side='left',fill='both',expand=True);self.content.rowconfigure(0,weight=1);self.content.columnconfigure(0,weight=1)
   self.pages={}
-  for key in ('overview','speed_manager','mosaic_speed_test','audit','settings'):
+  for key in ('overview','speed_manager','ap_associations','mosaic_speed_test','audit','settings'):
    page=ttk.Frame(self.content,padding=(15,12));page.grid(row=0,column=0,sticky='nsew');self.pages[key]=page
   self.auth=tk.StringVar(value='https://cloud.cambiumnetworks.com');self.cid=tk.StringVar();self.sec=tk.StringVar();self.remember_credentials=tk.BooleanVar(value=False);self.status=tk.StringVar(value='Disconnected');self.theme=tk.StringVar(value='Dark');self._loading_credentials=False;self.secret_client_id=None;self.loaded_secret_client_id=None;self.cid.trace_add('write',self.on_client_id_changed);self.sec.trace_add('write',self.on_client_secret_changed);self.mosaic_base_url=tk.StringVar(value=DEFAULT_MOSAIC_URL);self.mosaic_username=tk.StringVar();self.mosaic_password=tk.StringVar();self.mosaic_remember=tk.BooleanVar(value=False);self.mosaic_status=tk.StringVar(value='Disconnected');self.mosaic_search_code=tk.StringVar();self.mosaic_auto_retry=tk.BooleanVar(value=False);self.mosaic_retry_count_value=tk.StringVar(value='1')
-  self.build_speed_manager();self.build_mosaic_speed_test();self.build_overview();self.build_audit_page();self.build_settings();self.progtext.trace_add('write',self.on_publish_progress_changed)
+  self.build_speed_manager();self.build_ap_associations();self.build_mosaic_speed_test();self.build_overview();self.build_audit_page();self.build_settings();self.progtext.trace_add('write',self.on_publish_progress_changed)
  def add_nav_row(self,key,label,icon,parent=None,indent=0):
   c=self.colors;holder=parent or self.nav_container;row=tk.Frame(holder,bg=c['sidebar'],height=35,cursor='hand2');row.pack(fill='x',padx=(5+indent,7),pady=1);row.pack_propagate(False)
   bar=tk.Frame(row,bg=c['sidebar'],width=3);bar.pack(side='left',fill='y');ico=tk.Label(row,text=icon,font=('Segoe UI Symbol',11),width=2,fg=c['muted'],bg=c['sidebar'],cursor='hand2');ico.pack(side='left',padx=(5,3));text=tk.Label(row,text=label,font=('Segoe UI Semibold',11),anchor='w',fg=c['muted'],bg=c['sidebar'],cursor='hand2');text.pack(side='left',fill='both',expand=True)
@@ -194,6 +195,7 @@ class App(tk.Tk):
    if any(tool['key']==key for tool in service['tools']) and not service['expanded']:self.toggle_service(service)
   self.pages[key].tkraise();self.active_page=key;self.active_tool_view=key;self.refresh_nav()
   if key=='audit':self.refresh_audit()
+  if key=='ap_associations':self.render_associations()
   if key=='mosaic_speed_test':self.render_mosaic_candidates()
  def refresh_nav(self):
   c=self.colors
@@ -220,6 +222,84 @@ class App(tk.Tk):
   o,b=self.card(p,10,6);o.grid(row=5,column=0,sticky='ew');self.publish_panel=o;self.preview_window=None;self.preview_tree=None;self.target=tk.StringVar(value='50 Mbps');self.write=tk.BooleanVar(value=False);self.confirm=tk.StringVar();ttk.Label(b,text='Publish and verify',style='CardTitle.TLabel').grid(row=0,column=0,columnspan=6,sticky='w',pady=(0,4));ttk.Label(b,text='Target',style='SurfaceMuted.TLabel').grid(row=1,column=0,sticky='w');ttk.Combobox(b,textvariable=self.target,values=list(PKGS),state='readonly',width=12).grid(row=1,column=1,sticky='w');ttk.Button(b,text='Preview Changes',command=self.preview_changes).grid(row=1,column=2,padx=5,sticky='w');self.w=ttk.Checkbutton(b,text='Enable write actions',variable=self.write);self.w.grid(row=1,column=3,sticky='w');b.columnconfigure(4,weight=1)
   self.pub=ttk.Button(b,text='Publish and verify',style='Accent.TButton',command=self.publish_from_ui);self.pub.grid(row=2,column=0,sticky='w',pady=(5,0));ttk.Button(b,text='Audit Log',command=self.audit).grid(row=2,column=1,sticky='w',padx=5,pady=(5,0));self.progress=ttk.Progressbar(b,mode='determinate');self.progress.grid(row=2,column=2,columnspan=3,sticky='ew',padx=(14,0),pady=(5,0));self.progtext=tk.StringVar(value='No publish operation active.');ttk.Label(b,textvariable=self.progtext,style='SurfaceMuted.TLabel').grid(row=2,column=5,sticky='e',padx=(7,0),pady=(5,0));self.out=tk.Text(b,height=2,width=1,bg=self.colors['surface2'],fg=self.colors['text'],insertbackground=self.colors['text'],relief='flat',highlightbackground=self.colors['border'],highlightthickness=1,font=('Consolas',8),wrap='none');self.out.grid(row=3,column=0,columnspan=6,sticky='ew',pady=(5,0));self.out.grid_remove()
   self.mosaic_handoff_outer,handoff=self.card(p,10,6);self.mosaic_handoff_outer.grid(row=3,column=0,sticky='ew',pady=(0,5));self.mosaic_handoff_outer.grid_remove();handoff.columnconfigure(0,weight=1);self.mosaic_handoff_text=tk.StringVar(value='');ttk.Label(handoff,textvariable=self.mosaic_handoff_text,style='Surface.TLabel').grid(row=0,column=0,sticky='w');ttk.Button(handoff,text='Review speed tests',style='Accent.TButton',command=self.review_speedtests).grid(row=0,column=1,padx=5);ttk.Button(handoff,text='Dismiss',command=lambda:self.mosaic_handoff_outer.grid_remove()).grid(row=0,column=2)
+ def build_ap_associations(self):
+  p=self.pages['ap_associations'];p.columnconfigure(0,weight=1);p.rowconfigure(3,weight=1)
+  self.association_report=None;self.association_running=False;self.association_cancel=threading.Event();self.association_poll_after=None;self.association_query=tk.StringVar();self.association_online_only=tk.BooleanVar(value=False);self.association_status=tk.StringVar(value='Not loaded. Connect to cnMaestro and refresh.')
+  ttk.Label(p,text='AP Associations',style='PageTitle.TLabel').grid(row=0,column=0,sticky='w');ttk.Label(p,text='Subscriber modules grouped by the serving AP MAC reported in cnMaestro statistics',style='Muted.TLabel').grid(row=1,column=0,sticky='w',pady=(2,8))
+  o,b=self.card(p,10,6);o.grid(row=2,column=0,sticky='ew',pady=(0,5));b.columnconfigure(6,weight=1)
+  self.association_refresh=ttk.Button(b,text='Refresh report',style='Accent.TButton',command=self.load_associations);self.association_refresh.grid(row=0,column=0,sticky='w')
+  self.association_cancel_button=ttk.Button(b,text='Cancel',command=self.cancel_associations,state='disabled');self.association_cancel_button.grid(row=0,column=1,padx=(5,8),sticky='w')
+  ttk.Label(b,text='Search',style='SurfaceMuted.TLabel').grid(row=0,column=2,sticky='e',padx=(0,4))
+  self.association_search_entry=ttk.Entry(b,textvariable=self.association_query,width=22);self.association_search_entry.grid(row=0,column=3,sticky='w');self.association_query.trace_add('write',lambda *_:self.render_associations())
+  ttk.Checkbutton(b,text='Online SMs only',variable=self.association_online_only,command=self.render_associations).grid(row=0,column=4,padx=(10,0),sticky='w')
+  self.association_summary_export=ttk.Button(b,text='Export AP summary CSV',command=self.export_association_summary);self.association_summary_export.grid(row=0,column=5,padx=(10,0),sticky='w')
+  self.association_detail_export=ttk.Button(b,text='Export SM detail CSV',command=self.export_association_detail);self.association_detail_export.grid(row=0,column=6,padx=(5,0),sticky='e')
+  self.association_progress=ttk.Progressbar(b,mode='determinate');self.association_progress.grid(row=1,column=0,columnspan=7,sticky='ew',pady=(6,0))
+  ttk.Label(b,textvariable=self.association_status,style='SurfaceMuted.TLabel').grid(row=2,column=0,columnspan=7,sticky='w',pady=(4,0))
+  o,t=self.card(p,0,0);o.grid(row=3,column=0,sticky='nsew',pady=(0,5));t.columnconfigure(0,weight=1);t.rowconfigure(0,weight=1)
+  cols=('name','mac','kind','network','tower','sms','reported','state','age','distance');heads=('AP / Customer','MAC','Role','Network','Tower','SMs','AP connected','State','Uptime / Down','Distance');widths=(225,130,45,115,115,45,100,85,90,70);anchors=('w','w','center','w','w','center','center','w','w','w')
+  self.association_tree=ttk.Treeview(t,columns=cols,show='headings',selectmode='browse',height=10)
+  for col,head,width,anchor in zip(cols,heads,widths,anchors):self.association_tree.heading(col,text=head);self.association_tree.column(col,width=width,stretch=False,anchor=anchor)
+  self.association_tree.bind('<Double-1>',self.toggle_association_group);y=ttk.Scrollbar(t,orient='vertical',command=self.association_tree.yview);x=ttk.Scrollbar(t,orient='horizontal',command=self.association_tree.xview);self.association_tree.configure(yscrollcommand=y.set,xscrollcommand=x.set);self.association_tree.grid(row=0,column=0,sticky='nsew');y.grid(row=0,column=1,sticky='ns');x.grid(row=1,column=0,sticky='ew')
+  ttk.Label(p,text='Statistics are a point-in-time snapshot; offline SMs keep their last known AP. Double-click an AP row to collapse it.',style='Muted.TLabel').grid(row=4,column=0,sticky='w',pady=(4,0))
+ def association_progress_event(self,label,done,total):
+  self.association_progress.configure(maximum=max(int(total or 0),1),value=int(done or 0))
+  self.association_status.set(f'Collecting {label}: {done} of {total}' if total else f'Collecting {label}: {done}')
+ def load_associations(self):
+  if self.association_running:return
+  if not self.api:return messagebox.showerror('AP associations','Connect to cnMaestro first.')
+  api=self.api;self.association_cancel.clear();self.association_running=True;self.association_events=queue.Queue();self.association_refresh.configure(state='disabled');self.association_cancel_button.configure(state='normal');self.association_progress.configure(value=0,maximum=1);self.association_status.set('Collecting cnMaestro statistics...')
+  def progress(label,done,total):self.association_events.put(('progress',label,done,total))
+  def run():
+   try:self.association_events.put(('done',asyncio.run(fetch_association_report(api,progress=progress,cancel=self.association_cancel)),None))
+   except Exception as error:self.association_events.put(('done',None,error))
+  threading.Thread(target=run,daemon=True).start();self.association_poll_after=self.after(100,self.drain_association_events)
+ def drain_association_events(self):
+  finished=False
+  while True:
+   try:event=self.association_events.get_nowait()
+   except queue.Empty:break
+   if event[0]=='progress':self.association_progress_event(*event[1:])
+   else:finished=True;self.association_poll_after=None;self.finish_associations(event[1],event[2])
+  if not finished and self.association_running:self.association_poll_after=self.after(100,self.drain_association_events)
+ def cancel_associations(self):
+  if not self.association_running:return
+  self.association_cancel.set();self.association_status.set('Cancelling report...')
+ def finish_associations(self,report,error):
+  self.association_running=False;self.association_refresh.configure(state='normal');self.association_cancel_button.configure(state='disabled');self.association_progress.configure(value=0,maximum=1)
+  if isinstance(error,AssociationReportCancelled):self.association_status.set('Report cancelled.');return
+  if error:self.association_status.set('Report error: '+str(error));messagebox.showerror('AP associations',str(error));return
+  self.association_report=report;self.render_associations();self.association_status.set(summary_text(report))
+ def association_state_text(self,online):return 'Online' if online is True else ('Offline' if online is False else '')
+ def association_distance(self,value):
+  try:return f'{float(value):.2f} km'
+  except (TypeError,ValueError):return ''
+ def render_associations(self):
+  if not hasattr(self,'association_tree'):return
+  tree=self.association_tree;tree.delete(*tree.get_children())
+  if not self.association_report:return
+  roles={'ap':'AP','unknown':'AP?','unassigned':'-'}
+  for group in filter_groups(self.association_report,self.association_query.get(),bool(self.association_online_only.get())):
+   sms=group.get('sms',[]);reported=group.get('reported');marker=' ⚠' if reported is not None and group.get('online_sms') is not None and reported!=group['online_sms'] else '';parent='ap:'+group.get('mac','');group_age='' if group.get('status_time') is None else format_age(group.get('status_time'))
+   tree.insert('', 'end',iid=parent,open=True,values=(group.get('name',''),group.get('mac',''),roles.get(group.get('kind'),'AP'),group.get('network',''),group.get('tower',''),str(len(sms)),'' if reported is None else str(reported)+marker,self.association_state_text(group.get('online')),group_age,''))
+   for sm in sms:tree.insert(parent,'end',iid=f"sm:{group.get('mac','')}:{sm.get('mac','')}",values=(sm.get('name',''),sm.get('mac',''),'SM',group.get('network') or sm.get('network',''),group.get('tower') or sm.get('tower',''),'','',self.association_state_text(sm.get('online')),'' if sm.get('status_time') is None else format_age(sm.get('status_time')),self.association_distance(sm.get('distance'))))
+ def toggle_association_group(self,event):
+  row=self.association_tree.identify_row(event.y)
+  if not row or self.association_tree.parent(row):return
+  self.association_tree.item(row,open=not bool(self.association_tree.item(row,'open')))
+ def association_export_groups(self):return filter_groups(self.association_report,self.association_query.get(),bool(self.association_online_only.get())) if self.association_report else []
+ def export_association_summary(self):self.export_association_csv('summary')
+ def export_association_detail(self):self.export_association_csv('detail')
+ def export_association_csv(self,kind):
+  if not self.association_report:return messagebox.showinfo('AP associations','Refresh the report before exporting.')
+  groups=self.association_export_groups();rows=summary_csv_rows(self.association_report,groups) if kind=='summary' else detail_csv_rows(self.association_report,groups)
+  if not rows:return messagebox.showinfo('AP associations','The current filter has no rows to export.')
+  stamp=self.association_report.get('generated','')[:10];path=filedialog.asksaveasfilename(title=f'Export AP association {kind}',defaultextension='.csv',filetypes=[('CSV files','*.csv')],initialfile=f"ap-associations-{kind}-{stamp}.csv")
+  if not path:return
+  with open(path,'w',newline='',encoding='utf-8-sig') as handle:
+   writer=csv.DictWriter(handle,fieldnames=list(rows[0]));writer.writeheader()
+   for row in rows:writer.writerow({key:self.csv_cell(value) for key,value in row.items()})
+  messagebox.showinfo('AP association report exported',f'{len(rows)} row(s) exported to:\n{path}')
  def build_control_window(self):self.controls=self.pages['speed_manager']
  def open_controls(self):self.show_page('speed_manager')
  def back_to_speed_manager(self):self.show_page('speed_manager')
@@ -452,10 +532,15 @@ class App(tk.Tk):
    try:self.after_cancel(self.mosaic_progress_after)
    except Exception:pass
    self.mosaic_progress_after=None
+  self.association_running=False;self.association_cancel.set()
+  if self.association_poll_after:
+   try:self.after_cancel(self.association_poll_after)
+   except Exception:pass
+   self.association_poll_after=None
   if self.mosaic_api:self.mosaic_api.clear_session()
   self.mosaic_password.set('');self.sec.set('');self.destroy()
  def build_overview(self):
-  p=self.pages['overview'];ttk.Label(p,text='Overview',style='PageTitle.TLabel').pack(anchor='w');ttk.Label(p,text='Operations Toolkit services and operational status',style='Muted.TLabel').pack(anchor='w',pady=(3,15));o,b=self.card(p,14,12);o.pack(fill='x',pady=(0,8));ttk.Label(b,text='cnMaestro',style='CardTitle.TLabel').pack(anchor='w');ttk.Label(b,text='Speed Manager is available from the cnMaestro service menu.',style='SurfaceMuted.TLabel').pack(anchor='w',pady=(5,10));ttk.Button(b,text='Open Speed Manager',style='Accent.TButton',command=lambda:self.show_page('speed_manager')).pack(anchor='w');o,b=self.card(p,14,12);o.pack(fill='x');ttk.Label(b,text='Mosaic',style='CardTitle.TLabel').pack(anchor='w');ttk.Label(b,text='Match upgraded customers and run supported Ookla diagnostics.',style='SurfaceMuted.TLabel').pack(anchor='w',pady=(5,10));ttk.Button(b,text='Open Speed Test',style='Accent.TButton',command=lambda:self.show_page('mosaic_speed_test')).pack(anchor='w')
+  p=self.pages['overview'];ttk.Label(p,text='Overview',style='PageTitle.TLabel').pack(anchor='w');ttk.Label(p,text='Operations Toolkit services and operational status',style='Muted.TLabel').pack(anchor='w',pady=(3,15));o,b=self.card(p,14,12);o.pack(fill='x',pady=(0,8));ttk.Label(b,text='cnMaestro',style='CardTitle.TLabel').pack(anchor='w');ttk.Label(b,text='Speed Manager and AP Association reports are available from the cnMaestro service menu.',style='SurfaceMuted.TLabel').pack(anchor='w',pady=(5,10));actions=ttk.Frame(b,style='Surface.TFrame');actions.pack(anchor='w');ttk.Button(actions,text='Open Speed Manager',style='Accent.TButton',command=lambda:self.show_page('speed_manager')).pack(side='left');ttk.Button(actions,text='Open AP Associations',command=lambda:self.show_page('ap_associations')).pack(side='left',padx=(8,0));o,b=self.card(p,14,12);o.pack(fill='x');ttk.Label(b,text='Mosaic',style='CardTitle.TLabel').pack(anchor='w');ttk.Label(b,text='Match upgraded customers and run supported Ookla diagnostics.',style='SurfaceMuted.TLabel').pack(anchor='w',pady=(5,10));ttk.Button(b,text='Open Speed Test',style='Accent.TButton',command=lambda:self.show_page('mosaic_speed_test')).pack(anchor='w')
  def build_audit_page(self):
   p=self.pages['audit'];p.columnconfigure(0,weight=1);p.rowconfigure(2,weight=1);top=ttk.Frame(p);top.grid(row=0,column=0,sticky='ew');top.columnconfigure(0,weight=1);ttk.Label(top,text='Audit Log',style='PageTitle.TLabel').grid(row=0,column=0,sticky='w');ttk.Button(top,text='Export CSV',style='Accent.TButton',command=self.export_audit_csv).grid(row=0,column=1,sticky='e');ttk.Label(p,text='Recorded cnMaestro package operations',style='Muted.TLabel').grid(row=1,column=0,sticky='w',pady=(2,14));o,b=self.card(p,0,0);o.grid(row=2,column=0,sticky='nsew');b.columnconfigure(0,weight=1);b.rowconfigure(0,weight=1);cols=('time','name','mac','old','target','job','state','verified','success','detail');heads=('Timestamp UTC','Customer','MAC','Old','Target','Job ID','Job state','Verified','Success','Detail');self.audit_tree=ttk.Treeview(b,columns=cols,show='headings')
   for col,head in zip(cols,heads):self.audit_tree.heading(col,text=head);self.audit_tree.column(col,width=115,stretch=False)
