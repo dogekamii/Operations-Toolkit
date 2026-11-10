@@ -130,6 +130,13 @@ class AssociationUiTests(unittest.TestCase):
         self.assertEqual(str(self.app.association_cancel_button.cget("state")), "disabled")
         self.assertEqual(len(self.app.association_tree.get_children()), 3)
 
+    def test_degraded_report_shows_the_fallback_in_the_status(self):
+        report = sample_report()
+        report["degraded"] = True
+        self.app.finish_associations(report, None)
+        self.assertIn("per-device fallback", self.app.association_status.get())
+        self.assertEqual(len(self.app.association_tree.get_children()), 3)
+
     def test_cancellation_is_reported_as_status_not_an_error_dialog(self):
         with mock.patch.object(toolkit.messagebox, "showerror") as error:
             self.app.finish_associations(None, toolkit.AssociationReportCancelled("cancelled"))

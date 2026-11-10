@@ -1,12 +1,13 @@
-# Operations Toolkit 1.6.0
+# Operations Toolkit 1.6.1
 
-Operations Toolkit 1.6.0 is a local candidate that preserves the working cnMaestro Speed Manager and Mosaic Speed Test modules and adds an AP Association report built from cnMaestro statistics.
+Operations Toolkit 1.6.1 is a local candidate that preserves the working cnMaestro Speed Manager and Mosaic Speed Test modules and adds an AP Association report built from cnMaestro statistics.
 
-## What changed in 1.6.0
+## What changed in 1.6.1
 
 - Added **cnMaestro > AP Associations**: every PMP subscriber module is grouped under the AP MAC that cnMaestro statistics report as its serving AP.
 - Reads the Statistics API (`/api/v2/devices/statistics`), the only cnMaestro endpoint that exposes `ap_mac`; the Devices inventory endpoint does not return it.
-- Collects two paginated passes (AP statistics and SM statistics) and joins them locally, so a full-network report needs no per-device requests.
+- Collects one paginated statistics pass and partitions AP and SM rows locally, so a full-network report needs no per-device requests.
+- Fixes the statistics request for cnMaestro builds that reject `mode` with HTTP 400: the report no longer sends it, shows cnMaestro's own error text, and falls back to reading each SM's statistics individually if the bulk query is still refused. Fallback runs are labelled in the status line.
 - Lists every AP even when it has no associated SMs, and keeps two explicit exception buckets: SMs with no reported AP ("Unassigned") and SMs whose AP MAC is not in the AP inventory.
 - Cross-checks each AP's own `connected_sms` count against the number of online SMs in the report and marks differences, which exposes stale associations without hiding them.
 - Exports two Excel-compatible CSVs: one row per AP with SM MACs and names joined in-cell for management review, and one row per SM for pivot tables and per-customer lookup. Both follow the current search/online filter and prefix formula-leading cells.
@@ -70,10 +71,10 @@ To override the manifest URL, place a valid `update_config.json` beside the exec
 Run `build_windows.bat`, or use the equivalent command after installing `requirements.txt`:
 
 ```powershell
-pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.6.0" cnmaestro_speed_manager.py
+pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.6.1" cnmaestro_speed_manager.py
 ```
 
-The executable is written to `dist\Operations-Toolkit-v1.6.0.exe`.
+The executable is written to `dist\Operations-Toolkit-v1.6.1.exe`.
 
 ## Regression guard
 
@@ -87,7 +88,7 @@ The executable is written to `dist\Operations-Toolkit-v1.6.0.exe`.
 
 ![Operations Toolkit Mosaic Speed Test](screenshots/operations-toolkit-v1.5.0-mosaic-1280x760.png)
 
-![Operations Toolkit AP association report](screenshots/operations-toolkit-v1.6.0-ap-associations-1280x760.png)
+![Operations Toolkit AP association report](screenshots/operations-toolkit-v1.6.1-ap-associations-1280x760.png)
 
 ![Operations Toolkit post-upgrade speed-test handoff](screenshots/operations-toolkit-v1.5.0-post-upgrade-1280x760.png)
 

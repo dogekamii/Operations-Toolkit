@@ -8,14 +8,17 @@ report can be produced without per-device requests.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timezone
 
 import httpx
 
 STATISTICS_PATH = "/api/v2/devices/statistics"
+DEVICES_PATH = "/api/v2/devices"
 AP_FIELDS = "mac,name,network,tower,status,status_time,connected_sms,type,mode"
 SM_FIELDS = "mac,name,ap_mac,network,tower,status,status_time,distance,type,mode,last_sync"
+ALL_FIELDS = "mac,name,network,tower,status,status_time,connected_sms,ap_mac,distance,type,mode,last_sync"
 PAGE_SIZE = 100
 MAX_PAGES = 500
 UNASSIGNED_LABEL = "Unassigned - no AP reported"
@@ -51,6 +54,10 @@ DETAIL_FIELDS = (
 
 class AssociationReportCancelled(RuntimeError):
     """The operator cancelled the report while statistics pages were loading."""
+
+
+class AssociationReportError(RuntimeError):
+    """cnMaestro rejected the report query and the fallback did not rescue it."""
 
 
 def normalize_mac(value) -> str:
@@ -242,6 +249,8 @@ def summary_text(report: dict) -> str:
         parts.append(f"{summary['unknown_ap_count']} AP MAC(s) not in inventory")
     if summary.get("mismatch_count"):
         parts.append(f"{summary['mismatch_count']} AP count check(s) differ")
+    if report.get("degraded"):
+        parts.append("per-device fallback")
     parts.append(str(report.get("generated") or "").strip())
     return " | ".join(part for part in parts if part)
 
@@ -324,7 +333,7 @@ def detail_csv_rows(report: dict, groups=None) -> list[dict]:
     return rows
 
 
-async def _collect(api, params: dict, page_size: int, label: str, progress, cancel) -> list[dict]:
+async def _collect(api, path: str, params: dict, page_size: int, label: str, progress, cancel) -> list[dict]:
     client = await api.client()
     items: list[dict] = []
     offset = 0
@@ -336,7 +345,7 @@ async def _collect(api, params: dict, page_size: int, label: str, progress, canc
             query = dict(params)
             query["limit"] = page_size
             query["offset"] = offset
-            response = await api.req(client, "GET", api.base + STATISTICS_PATH, params=query)
+            response = await api.req(client, "GET", api.base + path, params=query)
             payload = response.json()
             page = payload.get("data") if isinstance(payload, dict) else payload
             page = list(page or [])
@@ -354,28 +363,146 @@ async def _collect(api, params: dict, page_size: int, label: str, progress, canc
             elif len(page) < page_size:
                 break
             if pages >= MAX_PAGES:
-                raise RuntimeError("cnMaestro statistics pagination did not complete.")
+                raise RuntimeError("cnMaestro pagination did not complete.")
             offset += len(page)
     finally:
         await client.aclose()
     return items
 
 
-async def _statistics_rows(api, mode: str, page_size: int, progress, cancel) -> list[dict]:
-    fields = AP_FIELDS if mode == "ap" else SM_FIELDS
-    label = "AP statistics" if mode == "ap" else "SM statistics"
+def _error_detail(payload) -> str:
+    if isinstance(payload, dict):
+        parts = []
+        for key in ("error", "message", "cause", "detail", "description"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                parts.extend(str(item) for item in value.values() if item)
+            elif value:
+                parts.append(str(value))
+        return " - ".join(dict.fromkeys(parts))
+    if isinstance(payload, list):
+        return "; ".join(str(item) for item in payload[:3])
+    return str(payload or "")
+
+
+def http_error_text(error: Exception) -> str:
+    """Include the server's own message; httpx alone only reports the status line."""
+    response = getattr(error, "response", None)
+    if response is None:
+        return str(error)
+    detail = ""
     try:
-        return await _collect(api, {"mode": mode, "fields": fields}, page_size, label, progress, cancel)
-    except httpx.HTTPStatusError as error:
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        if status not in (400, 422):
-            raise
-        # Older cnMaestro builds reject the fields projection; retry unfiltered.
-        return await _collect(api, {"mode": mode}, page_size, label, progress, cancel)
+        detail = _error_detail(response.json())
+    except Exception:
+        detail = (getattr(response, "text", "") or "").strip()
+    detail = " ".join(detail.split())[:400]
+    status = getattr(response, "status_code", "?")
+    return f"cnMaestro returned HTTP {status}: {detail}" if detail else f"cnMaestro returned HTTP {status}"
+
+
+def _partition_statistics(rows) -> tuple[list[dict], list[dict]]:
+    ap_rows = []
+    sm_rows = []
+    for row in rows or []:
+        mode = str(row.get("mode") or "").strip().lower()
+        if mode == "ap":
+            ap_rows.append(row)
+        elif mode == "sm":
+            sm_rows.append(row)
+    return ap_rows, sm_rows
+
+
+async def _bulk_statistics(api, page_size: int, progress, cancel) -> list[dict]:
+    # The documented statistics call uses fields only. Several cnMaestro builds
+    # answer 400 Bad Request when `mode` is supplied, so partition locally and
+    # only add a projection after the plain call is rejected.
+    last_error = None
+    for params in ({}, {"fields": ALL_FIELDS}):
+        try:
+            return await _collect(api, STATISTICS_PATH, params, page_size, "AP/SM statistics", progress, cancel)
+        except httpx.HTTPStatusError as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status not in (400, 404, 405, 422):
+                raise
+            last_error = error
+    raise last_error
+
+
+async def _per_device_statistics(api, progress, cancel) -> list[dict]:
+    """Last resort: one statistics read per SM from the working Devices API."""
+    devices = await api.inventory()
+    total = len(devices)
+    rows: list[dict] = []
+    done = 0
+    client = await api.client()
+    semaphore = asyncio.Semaphore(4)
+
+    async def one(device):
+        nonlocal done
+        async with semaphore:
+            if cancel is not None and cancel.is_set():
+                raise AssociationReportCancelled("Report collection cancelled.")
+            mac = str(device.get("mac") or "").strip()
+            if not mac:
+                return
+            response = await api.req(client, "GET", api.base + f"/api/v2/devices/{mac}/statistics")
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else payload
+            row = data[0] if isinstance(data, list) and data else data
+            if isinstance(row, dict):
+                row = dict(row)
+                row.setdefault("mac", mac)
+                row.setdefault("name", device.get("name"))
+                row.setdefault("type", device.get("type") or "pmp")
+                row.setdefault("mode", "sm")
+                rows.append(row)
+            done += 1
+            if progress:
+                progress("SM statistics (per device)", done, total)
+
+    try:
+        await asyncio.gather(*(one(device) for device in devices))
+    finally:
+        await client.aclose()
+    return rows
+
+
+async def _fallback_report(api, page_size: int, progress, cancel, generated, reason: str) -> dict:
+    try:
+        devices = await _collect(api, DEVICES_PATH, {"type": "pmp"}, page_size, "AP inventory", progress, cancel)
+        ap_rows = [row for row in devices if str(row.get("mode") or "").strip().lower() == "ap"]
+    except Exception:
+        ap_rows = []
+    sm_rows = await _per_device_statistics(api, progress, cancel)
+    report = build_association_report(sm_rows, ap_rows, generated=generated)
+    report["degraded"] = True
+    report["source"] = "per-device statistics"
+    report["bulk_error"] = reason
+    return report
 
 
 async def fetch_association_report(api, page_size: int = PAGE_SIZE, progress=None, cancel=None, generated=None) -> dict:
     """Collect AP and SM statistics through the connected cnMaestro API object."""
-    ap_rows = await _statistics_rows(api, "ap", page_size, progress, cancel)
-    sm_rows = await _statistics_rows(api, "sm", page_size, progress, cancel)
-    return build_association_report(sm_rows, ap_rows, generated=generated)
+    reason = ""
+    try:
+        rows = await _bulk_statistics(api, page_size, progress, cancel)
+    except AssociationReportCancelled:
+        raise
+    except httpx.HTTPStatusError as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        if status not in (400, 404, 405, 422):
+            raise AssociationReportError(http_error_text(error)) from error
+        reason = http_error_text(error)
+    else:
+        ap_rows, sm_rows = _partition_statistics(rows)
+        if ap_rows or sm_rows:
+            return build_association_report(sm_rows, ap_rows, generated=generated)
+        reason = "cnMaestro statistics response did not include device modes."
+
+    try:
+        return await _fallback_report(api, page_size, progress, cancel, generated, reason)
+    except AssociationReportCancelled:
+        raise
+    except Exception as error:
+        detail = http_error_text(error) if isinstance(error, httpx.HTTPStatusError) else str(error)
+        raise AssociationReportError(f"{reason} Per-device fallback also failed: {detail}") from error

@@ -62,13 +62,22 @@ class FakeClient:
 
 
 class FakeApi:
-    """Serves canned statistics pages per mode and records every query."""
+    """Serves canned cnMaestro pages per endpoint and records every query."""
 
-    def __init__(self, ap_rows=(), sm_rows=(), page_size=2, reject_fields=False, cancel_after_first=None):
+    def __init__(self, statistics_rows=(), device_rows=(), per_device_rows=(), inventory_rows=(),
+                 page_size=2, require_fields=False, reject_fields=False, bulk_status=None,
+                 per_device_status=None, bulk_error_body=None, cancel_after_first=None):
         self.base = "https://cnmaestro.test"
-        self.rows_by_mode = {"ap": list(ap_rows), "sm": list(sm_rows)}
+        self.statistics_rows = list(statistics_rows)
+        self.device_rows = list(device_rows)
+        self.per_device_rows = list(per_device_rows)
+        self.inventory_rows = list(inventory_rows)
         self.page_size = page_size
+        self.require_fields = require_fields
         self.reject_fields = reject_fields
+        self.bulk_status = bulk_status
+        self.per_device_status = per_device_status
+        self.bulk_error_body = bulk_error_body if bulk_error_body is not None else {"error": "invalid query"}
         self.cancel_after_first = cancel_after_first
         self.calls = []
         self.clients = []
@@ -78,13 +87,14 @@ class FakeApi:
         self.clients.append(client)
         return client
 
-    async def req(self, client, method, url, **kwargs):
-        params = dict(kwargs.get("params") or {})
-        self.calls.append((method, url, params))
-        if self.reject_fields and "fields" in params:
-            request = httpx.Request("GET", url)
-            raise httpx.HTTPStatusError("fields unsupported", request=request, response=httpx.Response(422, request=request))
-        rows = self.rows_by_mode.get(str(params.get("mode") or ""), [])
+    async def inventory(self):
+        return list(self.inventory_rows)
+
+    def _raise(self, url, status, body):
+        request = httpx.Request("GET", url)
+        raise httpx.HTTPStatusError(f"HTTP {status}", request=request, response=httpx.Response(status, json=body, request=request))
+
+    def _page(self, rows, url, params):
         offset = int(params.get("offset", 0))
         # Simulate a server-side page cap: never return more than page_size rows.
         limit = min(int(params.get("limit", self.page_size)), self.page_size)
@@ -92,6 +102,26 @@ class FakeApi:
         if self.cancel_after_first is not None and offset == 0:
             self.cancel_after_first.set()
         return FakeResponse({"paging": {"total": len(rows)}, "data": page})
+
+    async def req(self, client, method, url, **kwargs):
+        params = dict(kwargs.get("params") or {})
+        self.calls.append((method, url, params))
+        if url.endswith("/devices/statistics"):
+            if self.bulk_status is not None:
+                self._raise(url, self.bulk_status, self.bulk_error_body)
+            if self.require_fields and "fields" not in params:
+                self._raise(url, 400, {"error": "fields required"})
+            if self.reject_fields and "fields" in params:
+                self._raise(url, 422, {"error": "fields unsupported"})
+            return self._page(self.statistics_rows, url, params)
+        if "/devices/" in url and url.endswith("/statistics"):
+            if self.per_device_status is not None:
+                self._raise(url, self.per_device_status, {"error": "forbidden"})
+            mac = url.split("/devices/")[1].split("/")[0]
+            return FakeResponse({"data": [row for row in self.per_device_rows if row.get("mac") == mac]})
+        if url.endswith("/devices"):
+            return self._page(self.device_rows, url, params)
+        raise AssertionError(f"unexpected URL {url}")
 
 
 class MacNormalizationTests(unittest.TestCase):
@@ -302,44 +332,97 @@ class CsvRowTests(unittest.TestCase):
 class FetchReportTests(unittest.TestCase):
     def test_paginates_when_the_server_caps_page_size(self):
         rows = [ap_row(mac=f"AA:BB:CC:00:00:{index:02X}", name=f"AP {index}") for index in range(5)]
-        api = FakeApi(ap_rows=rows, page_size=2)
+        api = FakeApi(statistics_rows=rows, page_size=2)
         report = asyncio.run(service.fetch_association_report(api, page_size=5, generated=GENERATED))
         # The fake caps every page at two rows even though five were requested.
         self.assertEqual(report["summary"]["ap_count"], 5)
-        self.assertEqual([call[2]["offset"] for call in api.calls[:3]], [0, 2, 4])
+        self.assertEqual([call[2]["offset"] for call in api.calls], [0, 2, 4])
         self.assertTrue(all(client.closed for client in api.clients))
 
-    def test_requests_ap_then_sm_statistics_with_mode_and_fields(self):
-        api = FakeApi()
-        asyncio.run(service.fetch_association_report(api, generated=GENERATED))
-        modes = [call[2]["mode"] for call in api.calls]
-        self.assertEqual(modes, ["ap", "sm"])
-        self.assertIn("ap_mac", api.calls[1][2]["fields"])
-        self.assertTrue(all(call[1].endswith("/api/v2/devices/statistics") for call in api.calls))
+    def test_bulk_call_omits_mode_and_partitions_locally(self):
+        api = FakeApi(statistics_rows=[ap_row(), sm_row()])
+        report = asyncio.run(service.fetch_association_report(api, generated=GENERATED))
+        self.assertEqual(len(api.calls), 1)
+        method, url, params = api.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(url.endswith("/api/v2/devices/statistics"))
+        self.assertNotIn("mode", params)
+        self.assertNotIn("fields", params)
+        self.assertEqual(report["summary"]["ap_count"], 1)
+        self.assertEqual(report["summary"]["sm_count"], 1)
 
-    def test_fields_projection_rejection_falls_back_without_fields(self):
-        api = FakeApi(ap_rows=[ap_row(mac="AA:BB:CC:00:00:01")], reject_fields=True)
+    def test_fields_projection_is_retried_when_the_plain_call_is_rejected(self):
+        api = FakeApi(statistics_rows=[ap_row()], require_fields=True)
         report = asyncio.run(service.fetch_association_report(api, generated=GENERATED))
         self.assertEqual(report["summary"]["ap_count"], 1)
-        self.assertIn("fields", api.calls[0][2])
-        self.assertNotIn("fields", api.calls[1][2])
-        self.assertEqual(api.calls[1][2]["mode"], "ap")
+        self.assertNotIn("fields", api.calls[0][2])
+        self.assertIn("ap_mac", api.calls[1][2]["fields"])
 
     def test_cancel_event_stops_collection_and_closes_the_client(self):
         rows = [ap_row(mac=f"AA:BB:CC:00:00:{index:02X}") for index in range(4)]
         cancel = threading.Event()
-        api = FakeApi(ap_rows=rows, page_size=2, cancel_after_first=cancel)
+        api = FakeApi(statistics_rows=rows, page_size=2, cancel_after_first=cancel)
         with self.assertRaises(service.AssociationReportCancelled):
             asyncio.run(service.fetch_association_report(api, page_size=2, cancel=cancel, generated=GENERATED))
         self.assertTrue(api.clients[0].closed)
 
     def test_progress_reports_running_totals(self):
         rows = [ap_row(mac=f"AA:BB:CC:00:00:{index:02X}") for index in range(3)]
-        api = FakeApi(ap_rows=rows, page_size=2)
+        api = FakeApi(statistics_rows=rows, page_size=2)
         events = []
         asyncio.run(service.fetch_association_report(api, page_size=2, progress=lambda label, done, total: events.append((label, done, total)), generated=GENERATED))
-        self.assertEqual(events[0], ("AP statistics", 2, 3))
-        self.assertEqual(events[-1], ("SM statistics", 0, 0))
+        self.assertEqual(events[0], ("AP/SM statistics", 2, 3))
+        self.assertEqual(events[-1], ("AP/SM statistics", 3, 3))
+
+    def test_bulk_rejection_falls_back_to_per_device_statistics(self):
+        api = FakeApi(
+            device_rows=[ap_row()],
+            inventory_rows=[{"mac": "11:22:33:44:55:01", "name": "10014 Johnson", "type": "pmp", "mode": "sm"}],
+            per_device_rows=[sm_row()],
+            bulk_status=400,
+            bulk_error_body={"error": "Bad Request"},
+        )
+        report = asyncio.run(service.fetch_association_report(api, generated=GENERATED))
+        self.assertTrue(report["degraded"])
+        self.assertEqual(report["source"], "per-device statistics")
+        self.assertIn("HTTP 400", report["bulk_error"])
+        self.assertEqual(report["summary"]["ap_count"], 1)
+        self.assertEqual(report["summary"]["sm_count"], 1)
+        self.assertEqual([group["name"] for group in report["groups"]], ["North Sector A"])
+        self.assertTrue(any(call[1].endswith("/devices/11:22:33:44:55:01/statistics") for call in api.calls))
+
+    def test_missing_device_modes_falls_back_instead_of_returning_an_empty_report(self):
+        api = FakeApi(
+            statistics_rows=[{"mac": "AA:BB:CC:00:00:01", "name": "No mode", "type": "pmp"}],
+            device_rows=[ap_row()],
+            inventory_rows=[{"mac": "11:22:33:44:55:01", "name": "10014 Johnson", "type": "pmp", "mode": "sm"}],
+            per_device_rows=[sm_row()],
+        )
+        report = asyncio.run(service.fetch_association_report(api, generated=GENERATED))
+        self.assertTrue(report["degraded"])
+        self.assertEqual(report["summary"]["sm_count"], 1)
+
+    def test_fallback_failure_reports_both_cnmaestro_messages(self):
+        api = FakeApi(
+            device_rows=[],
+            inventory_rows=[{"mac": "11:22:33:44:55:01", "name": "10014 Johnson", "type": "pmp", "mode": "sm"}],
+            bulk_status=400,
+            bulk_error_body={"error": {"message": "mode not supported"}},
+            per_device_status=403,
+        )
+        with self.assertRaises(service.AssociationReportError) as caught:
+            asyncio.run(service.fetch_association_report(api, generated=GENERATED))
+        message = str(caught.exception)
+        self.assertIn("HTTP 400", message)
+        self.assertIn("mode not supported", message)
+        self.assertIn("fallback also failed", message)
+        self.assertIn("HTTP 403", message)
+
+    def test_http_error_text_extracts_nested_messages(self):
+        request = httpx.Request("GET", "https://cnmaestro.test/api/v2/devices/statistics")
+        response = httpx.Response(400, json={"error": {"message": "invalid mode", "cause": "AP"}}, request=request)
+        text = service.http_error_text(httpx.HTTPStatusError("bad", request=request, response=response))
+        self.assertEqual(text, "cnMaestro returned HTTP 400: invalid mode - AP")
 
 
 if __name__ == "__main__":

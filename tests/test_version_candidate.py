@@ -12,11 +12,11 @@ def version_tuple(value):
 
 class VersionCandidateTests(unittest.TestCase):
     def test_candidate_version_is_wired_through_release_artifacts(self):
-        self.assertEqual(toolkit.APP_VERSION, "1.6.0")
-        self.assertIn("# Operations Toolkit 1.6.0", (ROOT / "README.md").read_text(encoding="utf-8"))
-        self.assertIn("Operations-Toolkit-v1.6.0", (ROOT / "build_windows.bat").read_text(encoding="utf-8"))
+        self.assertEqual(toolkit.APP_VERSION, "1.6.1")
+        self.assertIn("# Operations Toolkit 1.6.1", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("Operations-Toolkit-v1.6.1", (ROOT / "build_windows.bat").read_text(encoding="utf-8"))
         workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
-        self.assertIn("Operations-Toolkit-v1.6.0", workflow)
+        self.assertIn("Operations-Toolkit-v1.6.1", workflow)
 
     def test_every_test_module_runs_in_ci(self):
         workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
