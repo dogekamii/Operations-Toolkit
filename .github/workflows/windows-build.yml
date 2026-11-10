@@ -32,6 +32,12 @@ jobs:
         env:
           OPERATIONS_TOOLKIT_PREVIEW: '1'
         run: python -m unittest -v tests/test_mosaic_ui.py
+      - name: AP association service tests
+        run: python -m unittest -v tests/test_association_service.py
+      - name: AP association in-app UI tests
+        env:
+          OPERATIONS_TOOLKIT_PREVIEW: '1'
+        run: python -m unittest -v tests/test_association_ui.py
       - name: Candidate version tests
         run: python -m unittest -v tests/test_version_candidate.py
       - name: Verify Windows Credential Manager backend
@@ -51,13 +57,13 @@ jobs:
       - name: Verify v1.1 AST behavior equivalence
         run: python release_checks/ast_behavior_guard.py
       - name: Build versioned one-file Windows EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.5.0" cnmaestro_speed_manager.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.6.0" cnmaestro_speed_manager.py
       - name: Smoke-test GUI launch
         shell: pwsh
         run: |
           $env:OPERATIONS_TOOLKIT_PREVIEW = '1'
           $env:OPERATIONS_TOOLKIT_SMOKE_NAV = '1'
-          $exe = Resolve-Path '.\dist\Operations-Toolkit-v1.5.0.exe'
+          $exe = Resolve-Path '.\dist\Operations-Toolkit-v1.6.0.exe'
           $launcher = Start-Process -FilePath $exe -PassThru
           $deadline = (Get-Date).AddSeconds(12)
           $windowProcess = $null
@@ -85,14 +91,14 @@ jobs:
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
-          $name = 'Operations-Toolkit-v1.5.0.exe'
+          $name = 'Operations-Toolkit-v1.6.0.exe'
           $hash = (Get-FileHash ".\dist\$name" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name" | Set-Content -NoNewline -Encoding ascii .\dist\SHA256SUMS
           Get-Content .\dist\SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: Operations-Toolkit-v1.5.0-windows
+          name: Operations-Toolkit-v1.6.0-windows
           if-no-files-found: error
           path: |
-            dist/Operations-Toolkit-v1.5.0.exe
+            dist/Operations-Toolkit-v1.6.0.exe
             dist/SHA256SUMS

@@ -38,7 +38,7 @@ class InlineToolViewTests(unittest.TestCase):
 
     def assert_speed_manager_context_is_active(self):
         self.assertEqual(self.app.active_page, "speed_manager")
-        self.assertEqual(set(self.app.nav_items), {"overview", "speed_manager", "mosaic_speed_test", "audit", "settings"})
+        self.assertEqual(set(self.app.nav_items), {"overview", "speed_manager", "ap_associations", "mosaic_speed_test", "audit", "settings"})
         _, bar, _, _ = self.app.nav_items["speed_manager"]
         self.assertEqual(bar.cget("background"), self.app.colors["accent"])
 
@@ -46,7 +46,7 @@ class InlineToolViewTests(unittest.TestCase):
         self.assertEqual(
             [(service["label"], [(tool["key"], tool["label"]) for tool in service["tools"]])
              for service in self.app.service_navigation],
-            [("cnMaestro", [("speed_manager", "Speed Manager")]), ("Mosaic", [("mosaic_speed_test", "Speed Test")])],
+            [("cnMaestro", [("speed_manager", "Speed Manager"), ("ap_associations", "AP Associations")]), ("Mosaic", [("mosaic_speed_test", "Speed Test")])],
         )
         _, _, _, overview = self.app.nav_items["overview"]
         _, _, _, audit = self.app.nav_items["audit"]
@@ -55,10 +55,10 @@ class InlineToolViewTests(unittest.TestCase):
                          ["Overview", "Audit Log", "Settings"])
 
     def test_navigation_labels_use_v120_text_size(self):
-        labels = [self.app.nav_items[key][3] for key in ("overview", "speed_manager", "mosaic_speed_test", "audit", "settings")]
+        labels = [self.app.nav_items[key][3] for key in ("overview", "speed_manager", "ap_associations", "mosaic_speed_test", "audit", "settings")]
         labels.append(self.app.service_navigation[0]["widgets"][2])
         sizes = [tkfont.Font(root=self.app, font=label.cget("font")).cget("size") for label in labels]
-        self.assertEqual(sizes, [11, 11, 11, 11, 11, 11])
+        self.assertEqual(sizes, [11, 11, 11, 11, 11, 11, 11])
 
     def test_nested_tool_label_fits_without_clipping(self):
         self.app.deiconify()

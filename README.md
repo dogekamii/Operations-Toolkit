@@ -1,6 +1,18 @@
-# Operations Toolkit 1.5.0
+# Operations Toolkit 1.6.0
 
-Operations Toolkit 1.5.0 is a local candidate that preserves the working cnMaestro Speed Manager and adds a separate Mosaic Speed Test module with an explicit post-upgrade handoff.
+Operations Toolkit 1.6.0 is a local candidate that preserves the working cnMaestro Speed Manager and Mosaic Speed Test modules and adds an AP Association report built from cnMaestro statistics.
+
+## What changed in 1.6.0
+
+- Added **cnMaestro > AP Associations**: every PMP subscriber module is grouped under the AP MAC that cnMaestro statistics report as its serving AP.
+- Reads the Statistics API (`/api/v2/devices/statistics`), the only cnMaestro endpoint that exposes `ap_mac`; the Devices inventory endpoint does not return it.
+- Collects two paginated passes (AP statistics and SM statistics) and joins them locally, so a full-network report needs no per-device requests.
+- Lists every AP even when it has no associated SMs, and keeps two explicit exception buckets: SMs with no reported AP ("Unassigned") and SMs whose AP MAC is not in the AP inventory.
+- Cross-checks each AP's own `connected_sms` count against the number of online SMs in the report and marks differences, which exposes stale associations without hiding them.
+- Exports two Excel-compatible CSVs: one row per AP with SM MACs and names joined in-cell for management review, and one row per SM for pivot tables and per-customer lookup. Both follow the current search/online filter and prefix formula-leading cells.
+- Stamps every row with the UTC snapshot time. The report is a point-in-time read, not history.
+- Runs collection off the Tk thread with progress, cancellation, and a clear failure message when cnMaestro rejects the request.
+- Preserves the cnMaestro Speed Manager, Mosaic, audit, and credential behavior from previous releases.
 
 ## What changed in 1.5.0
 
@@ -32,9 +44,20 @@ Older releases remain available in GitHub release history.
 
 ## Run from source
 
-On Windows, run **Launch Operations Toolkit.bat**. Expand **cnMaestro** for Speed Manager or **Mosaic** for Speed Test. Keep remote actions disabled during validation.
+On Windows, run **Launch Operations Toolkit.bat**. Expand **cnMaestro** for Speed Manager and AP Associations, or **Mosaic** for Speed Test. Keep remote actions disabled during validation.
 
 The pinned dependencies are listed in `requirements.txt`; `keyring` uses the current Windows user's Credential Manager on Windows.
+
+## AP association report
+
+Expand **cnMaestro > AP Associations**, connect from the Speed Manager page, then choose **Refresh report**. Double-click an AP row to collapse or expand it.
+
+- **Export AP summary CSV** is the manager-facing view: one row per AP with network, tower, SM count, the AP's own connected count, and the SM MACs and names joined in single cells.
+- **Export SM detail CSV** is the pivot-friendly view: one row per subscriber module with its AP MAC, AP name, state, status age, distance, and last sync time.
+
+Both exports follow the current search and **Online SMs only** filter. Statistics are a point-in-time read: offline SMs keep the last AP they reported, so the report is the current association map rather than an association history. An AP whose `connected_sms` count disagrees with the online SM count is marked with `⚠`; that normally means the AP's view and the SM's last report have not converged yet. Only PMP SMs are included, matching the Speed Manager's package model.
+
+If the report fails immediately, check that the API client can read `Statistics` data for the account; cnMaestro returns 401/403 for a client limited to Devices.
 
 ## Update checks
 
@@ -47,10 +70,10 @@ To override the manifest URL, place a valid `update_config.json` beside the exec
 Run `build_windows.bat`, or use the equivalent command after installing `requirements.txt`:
 
 ```powershell
-pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.5.0" cnmaestro_speed_manager.py
+pyinstaller --noconfirm --clean --onefile --windowed --hidden-import keyring.backends.Windows --name "Operations-Toolkit-v1.6.0" cnmaestro_speed_manager.py
 ```
 
-The executable is written to `dist\Operations-Toolkit-v1.5.0.exe`.
+The executable is written to `dist\Operations-Toolkit-v1.6.0.exe`.
 
 ## Regression guard
 
@@ -63,6 +86,8 @@ The executable is written to `dist\Operations-Toolkit-v1.5.0.exe`.
 ![Operations Toolkit in-app Audit Log](screenshots/operations-toolkit-v1.3.0-audit-log-1280x760.png)
 
 ![Operations Toolkit Mosaic Speed Test](screenshots/operations-toolkit-v1.5.0-mosaic-1280x760.png)
+
+![Operations Toolkit AP association report](screenshots/operations-toolkit-v1.6.0-ap-associations-1280x760.png)
 
 ![Operations Toolkit post-upgrade speed-test handoff](screenshots/operations-toolkit-v1.5.0-post-upgrade-1280x760.png)
 

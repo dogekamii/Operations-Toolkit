@@ -24,7 +24,7 @@ class MosaicUiTests(unittest.TestCase):
     def test_nested_mosaic_speed_test_page_uses_in_app_navigation(self):
         hierarchy = [(service["label"], [(tool["key"], tool["label"]) for tool in service["tools"]]) for service in self.app.service_navigation]
         self.assertEqual(hierarchy, [
-            ("cnMaestro", [("speed_manager", "Speed Manager")]),
+            ("cnMaestro", [("speed_manager", "Speed Manager"), ("ap_associations", "AP Associations")]),
             ("Mosaic", [("mosaic_speed_test", "Speed Test")]),
         ])
         self.assertIn("mosaic_speed_test", self.app.pages)
